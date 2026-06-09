@@ -258,9 +258,8 @@ def heuristics(md, lum, colors=None, ocr=None):
     if lum:
         sig["dark"] = lum["mean"] < 60
         sig["bright"] = lum["mean"] > 180
-        sig["high_contrast"] = lum["std"] > 40  # lower threshold for terminal text
+        sig["high_contrast"] = lum["std"] > 40
         sig["low_contrast"] = lum["std"] < 25
-        # Bimodal: has both dark areas AND pixels > mean+30 (text on dark bg)
         sig["bimodal"] = lum["dark_pct"] > 30 and (lum["max"] - lum["mean"]) > 60
         sig["mostly_dark_area"] = lum["dark_pct"] > 50
 
@@ -289,11 +288,9 @@ def heuristics(md, lum, colors=None, ocr=None):
         sig["large"] = mp > 5
         sig["widescreen"] = ar and abs(ar - 16/9) < 0.15
         sig["portrait"] = ar and 0 < ar < 0.9
-        sig["tall_portrait"] = ar and 0 < ar < 0.56  # mobile
+        sig["tall_portrait"] = ar and 0 < ar < 0.56
 
     # ── Classification rules ──
-    # Each rule is a boolean heuristic. Multiple may be true.
-
     h["terminal_screenshot"] = bool(
         sig.get("dark") and sig.get("bimodal")
         and sig.get("has_text") and not sig.get("large")
@@ -322,13 +319,11 @@ def heuristics(md, lum, colors=None, ocr=None):
         and not sig.get("large")
     )
 
-    # Composite: any text-based screenshot
     h["text_screenshot"] = bool(
         sig.get("has_text") and not sig.get("photo")
         and not sig.get("large")
     )
 
-    # Aspect ratio (always useful)
     if sig.get("widescreen"):
         h["widescreen"] = True
     if sig.get("portrait") and md.get("width", 0) < md.get("height", 0):
@@ -342,7 +337,6 @@ def heuristics(md, lum, colors=None, ocr=None):
 # ═══════════════════════════════════════════════
 
 def _ocr_deskew(img):
-    """Detect and correct skew using OSD if available."""
     if not DEP["pytesseract"] or not DEP["tesseract_bin"]:
         return img
     try:
@@ -356,29 +350,25 @@ def _ocr_deskew(img):
 
 
 def _ocr_preprocess(rgb_img):
-    """Preprocess image for better OCR accuracy.
-    Strategy: Tesseract has good internal preprocessing, so we only:
-    - Binarize bright/scan-like images (improves OCR on documents)
-    - Upscale small images (improves OCR on small text)
-    - Skip aggressive denoising (Tesseract handles this internally)
-    """
     if not DEP["numpy"]:
         return rgb_img
 
     arr = np.array(rgb_img.convert("L"), dtype=np.uint8)
     mean_brightness = float(arr.mean())
 
-    # Dark image (mean<80): likely terminal screenshot, keep as-is
-    # Binarization would destroy colored text on dark bg
     if mean_brightness < 80:
         result_img = rgb_img
+    elif mean_brightness > 240:
+        gray_arr = np.array(rgb_img.convert("L"), dtype=np.uint8)
+        threshold = max(mean_brightness * 0.85, 128)
+        binary = (gray_arr > threshold).astype(np.uint8) * 255
+        result_img = Image.fromarray(binary).convert("RGB")
     else:
-        # Bright image → simple binarization for document OCR
         gray_img = rgb_img.convert("L")
-        binary = (np.array(gray_img, dtype=np.uint8) > mean_brightness).astype(np.uint8) * 255
+        threshold = max(mean_brightness * 0.8, 100)
+        binary = (np.array(gray_img, dtype=np.uint8) > threshold).astype(np.uint8) * 255
         result_img = Image.fromarray(binary).convert("RGB")
 
-    # Scale up small images for better OCR
     w, h = result_img.size
     if min(h, w) < 500:
         scale = max(1.0, 800 / min(h, w))
@@ -390,42 +380,31 @@ def _ocr_preprocess(rgb_img):
 
 
 def run_ocr(rgb_img, ocr_lang="eng"):
-    """Run Tesseract OCR with preprocessing. Returns structured result or error dict."""
     if not DEP["pytesseract"]:
         return {"error": "pytesseract not installed. Run: pip install pytesseract"}
     if not DEP["tesseract_bin"]:
         return {"error": "Tesseract binary not found on system"}
 
     try:
-        # Check language availability
         try:
             available = _pt.get_languages(config="")
         except Exception:
-            available = ["eng"]  # assume at least English
+            available = ["eng"]
 
-        # Normalize language string
-        lang_used = ocr_lang
-        if ocr_lang not in available:
-            # Check joined variant (chi_sim+eng vs chi_sim+eng)
-            joined = ocr_lang.replace("+", "_")
-            if joined not in available:
-                # Fallback
-                fallback = [l for l in available if l != "osd"]
-                lang_used = fallback[0] if fallback else "eng"
+        requested_langs = ocr_lang.replace("+", " ").split()
+        missing = [l for l in requested_langs if l not in available]
+        if len(missing) == len(requested_langs):
+            fallback = [l for l in available if l != "osd"]
+            lang_used = fallback[0] if fallback else "eng"
         else:
             lang_used = ocr_lang
 
-        # Preprocess
         processed = _ocr_preprocess(rgb_img)
         processed = _ocr_deskew(processed)
 
-        # ── Structured OCR (with bounding boxes) ──
         data = _pt.image_to_data(processed, lang=lang_used, output_type=_pt.Output.DICT)
-
-        # ── Also get plain text ──
         text = _pt.image_to_string(processed, lang=lang_used)
 
-        # Build per-word data
         words = []
         text_lines = [l.strip() for l in text.split("\n") if l.strip()]
 
@@ -446,7 +425,6 @@ def run_ocr(rgb_img, ocr_lang="eng"):
                     "block": data["block_num"][i],
                 })
 
-        # Truncate text
         max_chars = 3000
         truncated = len(text) > max_chars
 
@@ -458,10 +436,9 @@ def run_ocr(rgb_img, ocr_lang="eng"):
             "total_chars": len(text),
             "text": text[:max_chars],
             "truncated": truncated,
-            "word_details": words[:200],  # cap word details
+            "word_details": words[:200],
         }
 
-        # Average confidence
         if words:
             ocr_result["avg_confidence"] = round(
                 sum(w["confidence"] for w in words) / len(words), 1
@@ -482,10 +459,6 @@ VISION_ENDPOINT = "https://api.siliconflow.cn/v1/chat/completions"
 
 
 def call_vision(image_path: str, prompt: str = None) -> dict:
-    """
-    Send image to SiliconFlow Qwen3-VL-32B for visual understanding.
-    Returns description of image contents (scene, objects, text, colors, etc.)
-    """
     if not DEP["requests"]:
         return {"error": "requests library not installed. Run: pip install requests"}
     if not DEP["vision_api_key"]:
@@ -506,12 +479,10 @@ def call_vision(image_path: str, prompt: str = None) -> dict:
         img = Image.open(image_path)
         fmt = img.format or "PNG"
         buf = io.BytesIO()
-        # Save as JPEG if possible to reduce size
         save_fmt = fmt
         if fmt.upper() in ("PNG", "JPEG", "JPG", "WEBP"):
             img.save(buf, format=fmt)
         else:
-            # Convert to PNG for unsupported formats
             img.save(buf, format="PNG")
             save_fmt = "PNG"
 
@@ -568,7 +539,6 @@ def call_vision(image_path: str, prompt: str = None) -> dict:
 # ═══════════════════════════════════════════════
 
 def analyze_image(image_path: str, ocr_lang: str = "eng", enable_vision: bool = False):
-    """Analyze an image and return structured results."""
     path = Path(image_path)
     result = {
         "file": str(path.resolve()),
@@ -585,7 +555,6 @@ def analyze_image(image_path: str, ocr_lang: str = "eng", enable_vision: bool = 
             "file": str(path.resolve()),
         }
 
-    # ── Open image ──
     try:
         img = Image.open(path)
     except Exception as e:
@@ -593,32 +562,26 @@ def analyze_image(image_path: str, ocr_lang: str = "eng", enable_vision: bool = 
 
     result["metadata"] = extract_metadata(img, path)
 
-    # EXIF
     exif = extract_exif(img)
     if exif:
         result["exif"] = exif
 
-    # ── Downscale if needed ──
     rgb_img = _to_rgb(img)
     rgb_img, was_downscaled = _downscale(rgb_img, max_dim=2000)
     if was_downscaled:
         result["downscaled"] = {"original_size": f"{img.width}x{img.height}", "new_size": f"{rgb_img.width}x{rgb_img.height}"}
 
-    # ── Color analysis ──
     colors = analyze_colors(rgb_img)
     if colors:
         result["colors"] = colors
 
-    # ── Luminance ──
     lum = analyze_luminance(rgb_img)
     if lum:
         result["luminance"] = lum
 
-    # ── OCR ──
     ocr_result = run_ocr(rgb_img, ocr_lang)
     result["ocr"] = ocr_result
 
-    # ── Heuristics (uses luminance, colors, OCR, metadata) ──
     h = heuristics(
         result.get("metadata", {}), lum,
         colors=result.get("colors"), ocr=ocr_result,
@@ -626,7 +589,6 @@ def analyze_image(image_path: str, ocr_lang: str = "eng", enable_vision: bool = 
     if h:
         result["heuristics"] = h
 
-    # ── Vision API ──
     if enable_vision:
         if DEP["vision_api_key"] and DEP["requests"]:
             result["vision"] = call_vision(image_path)
@@ -644,28 +606,23 @@ def analyze_image(image_path: str, ocr_lang: str = "eng", enable_vision: bool = 
 # ═══════════════════════════════════════════════
 
 def check_dependencies():
-    """Run a comprehensive check and return status."""
     checks = {}
 
-    # Pillow
     if DEP["pillow"]:
         checks["pillow"] = {"status": "ok", "version": Image.__version__ if hasattr(Image, "__version__") else "?"}
     else:
         checks["pillow"] = {"status": "missing", "fix": "pip install Pillow"}
 
-    # numpy
     if DEP["numpy"]:
         checks["numpy"] = {"status": "ok", "version": np.__version__ if hasattr(np, "__version__") else "?"}
     else:
         checks["numpy"] = {"status": "missing", "fix": "pip install numpy"}
 
-    # pytesseract
     if DEP["pytesseract"]:
         checks["pytesseract"] = {"status": "ok"}
     else:
         checks["pytesseract"] = {"status": "missing", "fix": "pip install pytesseract"}
 
-    # Tesseract binary
     if DEP["tesseract_bin"]:
         try:
             import subprocess
@@ -677,7 +634,6 @@ def check_dependencies():
     else:
         checks["tesseract_binary"] = {"status": "missing", "fix": "Install Tesseract-OCR from https://github.com/UB-Mannheim/tesseract/wiki"}
 
-    # Tesseract languages
     if DEP["pytesseract"] and DEP["tesseract_bin"]:
         try:
             langs = _pt.get_languages(config="")
@@ -685,25 +641,21 @@ def check_dependencies():
         except Exception as e:
             checks["tesseract_languages"] = {"status": "error", "detail": str(e)}
 
-    # requests
     if DEP["requests"]:
         checks["requests"] = {"status": "ok"}
     else:
         checks["requests"] = {"status": "missing", "fix": "pip install requests", "note": "Required for Vision API"}
 
-    # sklearn
     if DEP["sklearn"]:
         checks["sklearn"] = {"status": "ok"}
     else:
         checks["sklearn"] = {"status": "missing (optional)", "fix": "pip install scikit-learn", "note": "Falls back to quantize for color analysis"}
 
-    # Vision API key
     if DEP["vision_api_key"]:
         checks["siliconflow_api_key"] = {"status": "ok"}
     else:
         checks["siliconflow_api_key"] = {"status": "not set", "fix": "export SILICONFLOW_API_KEY=your_key", "note": "Required for Vision API"}
 
-    # Test Vision API connectivity
     if DEP["vision_api_key"] and DEP["requests"]:
         try:
             test_resp = _req.get(
@@ -728,7 +680,6 @@ def check_dependencies():
 
 
 def install_deps():
-    """Install missing Python packages."""
     import subprocess
     required = []
     optional = []
@@ -745,55 +696,30 @@ def install_deps():
         optional.append("scikit-learn")
 
     if not required and not optional:
-        print(json.dumps({
-            "status": "ok",
-            "message": "All dependencies already installed.",
-        }, ensure_ascii=False, indent=2))
+        print(json.dumps({"status": "ok", "message": "All dependencies already installed."}, ensure_ascii=False, indent=2))
         return
 
     all_pkgs = required + optional
-
-    print(json.dumps({
-        "status": "installing",
-        "required": required,
-        "optional": optional,
-    }, ensure_ascii=False, indent=2))
+    print(json.dumps({"status": "installing", "required": required, "optional": optional}, ensure_ascii=False, indent=2))
     print("---")
 
     try:
         cmd = [sys.executable, "-m", "pip", "install"] + all_pkgs
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
         if result.returncode == 0:
-            print(json.dumps({
-                "status": "ok",
-                "installed": all_pkgs,
-            }, ensure_ascii=False, indent=2))
+            print(json.dumps({"status": "ok", "installed": all_pkgs}, ensure_ascii=False, indent=2))
         else:
-            print(json.dumps({
-                "status": "error",
-                "detail": result.stderr[-500:],
-            }, ensure_ascii=False, indent=2))
+            print(json.dumps({"status": "error", "detail": result.stderr[-500:]}, ensure_ascii=False, indent=2))
             sys.exit(1)
     except subprocess.TimeoutExpired:
-        print(json.dumps({
-            "status": "error",
-            "detail": "pip install timed out (180s)",
-        }, ensure_ascii=False, indent=2))
+        print(json.dumps({"status": "error", "detail": "pip install timed out (180s)"}, ensure_ascii=False, indent=2))
         sys.exit(1)
     except Exception as e:
-        print(json.dumps({
-            "status": "error",
-            "detail": str(e),
-        }, ensure_ascii=False, indent=2))
+        print(json.dumps({"status": "error", "detail": str(e)}, ensure_ascii=False, indent=2))
         sys.exit(1)
 
 
-# ═══════════════════════════════════════════════
-# CLI
-# ═══════════════════════════════════════════════
-
 def main():
-    # Fix Windows console encoding for Chinese output
     if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
         try:
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -818,12 +744,8 @@ def main():
         checks = check_dependencies()
         output = json.dumps(checks, ensure_ascii=False, indent=2 if args.pretty else None)
         print(output)
-        # Exit with error code if critical deps missing
         critical = ["pillow"]
-        has_errors = any(
-            checks.get(c, {}).get("status") == "missing"
-            for c in critical
-        )
+        has_errors = any(checks.get(c, {}).get("status") == "missing" for c in critical)
         sys.exit(1 if has_errors else 0)
 
     if not args.image:
@@ -831,11 +753,9 @@ def main():
         sys.exit(1)
 
     result = analyze_image(args.image, ocr_lang=args.ocr_lang, enable_vision=args.vision)
-
     output = json.dumps(result, ensure_ascii=False, indent=2 if args.pretty else None)
     print(output)
 
-    # Exit with error if top-level error
     if "error" in result:
         sys.exit(1)
 
